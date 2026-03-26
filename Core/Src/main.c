@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include <string.h>
 #include <stdlib.h> // strtof 所在库
+#include <math.h>   // fabsf
 #include "oled.h"   // 引入真实的 OLED 驱动
 /* USER CODE END Includes */
 
@@ -65,6 +66,7 @@ typedef struct {
     float Kp, Ki, Kd;
     float integral;
     float last_error;
+    float last_derivative;  // D项低通滤波记忆值
 } PID_TypeDef;
 
 // 声明两个 PID 变量
@@ -121,8 +123,8 @@ int main(void)
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 // 初始化PID
-pid_x.Kp = 1.2f; pid_x.Ki = 0.05f; pid_x.Kd = 0.3f; pid_x.integral = 0; pid_x.last_error = 0;
-pid_y.Kp = 1.2f; pid_y.Ki = 0.05f; pid_y.Kd = 0.3f; pid_y.integral = 0; pid_y.last_error = 0;
+pid_x.Kp = 1.2f; pid_x.Ki = 0.05f; pid_x.Kd = 0.3f; pid_x.integral = 0; pid_x.last_error = 0; pid_x.last_derivative = 0;
+pid_y.Kp = 1.2f; pid_y.Ki = 0.05f; pid_y.Kd = 0.3f; pid_y.integral = 0; pid_y.last_error = 0; pid_y.last_derivative = 0;
 
 // OLED 初始化与开机动画 (注意这里函数名改成了 OLED_ShowStr，并且加了 unsigned char* 强转消除警告)
 OLED_Init();
@@ -137,6 +139,10 @@ __HAL_UART_ENABLE_IT(&huart1, UART_IT_IDLE);
 
 HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1); 
 HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4); 
+// Fix2: 上电安全归中 — 强制舵机到中位(1500us)，防止上电瞬间满偏
+__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1500);
+__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 1500);
+HAL_Delay(500);  // 让舵机有时间稳定到中位
 HAL_TIM_Base_Start_IT(&htim2);
   /* USER CODE END 2 */
 
@@ -258,7 +264,7 @@ void SystemClock_Config(void)
 #define LIMIT(val, min, max) ((val) < (min) ? (min) : ((val) > (max) ? (max) : (val)))
 #define INTEGRAL_MAX 200.0f 
 
-// 带有 dt 物理意义的抗饱和 PID
+// 带有 dt 物理意义的抗饱和 PID + D项一阶低通滤波
 float PID_Calculate(PID_TypeDef *pid, float target, float current, float dt) 
 {
     float error = target - current;
@@ -267,10 +273,12 @@ float PID_Calculate(PID_TypeDef *pid, float target, float current, float dt)
     if(pid->integral > INTEGRAL_MAX) pid->integral = INTEGRAL_MAX;
     else if(pid->integral < -INTEGRAL_MAX) pid->integral = -INTEGRAL_MAX;
     
-    float derivative = (error - pid->last_error) / dt;
+    // Fix1: D项一阶低通滤波 — 0.3*新值+0.7*旧值，滤除像素噪声导致的高频震荡
+    float raw_derivative = (error - pid->last_error) / dt;
+    pid->last_derivative = 0.3f * raw_derivative + 0.7f * pid->last_derivative;
     pid->last_error = error;
     
-    return (pid->Kp * error) + (pid->Ki * pid->integral) + (pid->Kd * derivative);
+    return (pid->Kp * error) + (pid->Ki * pid->integral) + (pid->Kd * pid->last_derivative);
 }
 
 // TIM2 控制心跳：全系统唯一允许操作 PWM 硬件的地方，彻底消灭数据竞争
@@ -288,6 +296,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
         // 优先级2：无有效数据不动作
         if(data_ready_flag == 0) return; 
+
+        // Fix3: 误差死区 — 极小误差时不动作，防止舵机在目标点附近高频微颤
+        float err_x = target_x - current_x;
+        float err_y = target_y - current_y;
+        if(fabsf(err_x) < 2.0f && fabsf(err_y) < 2.0f) return;
 
         // 优先级3：闭环计算 (dt = 0.02s)
         float pid_out_x = PID_Calculate(&pid_x, target_x, current_x, 0.02f);

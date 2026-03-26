@@ -20,6 +20,7 @@ import os
 import argparse
 import serial  # type: ignore
 from task_scheduler import TaskStateMachine  # type: ignore
+from telemetry import Telemetry  # type: ignore
 
 # ==================== 常量 ====================
 
@@ -330,6 +331,9 @@ def main():
     # ---- 状态机 ----
     sm = TaskStateMachine()
 
+    # ---- 遥测波形 ----
+    telem = Telemetry(max_points=500, update_interval=0.08)
+
     # ---- 鼠标回调：左键点击设置目标 / Task5 裁判指定 ----
     def mouse_callback(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -458,6 +462,11 @@ def main():
                     serial_ok = False
                 last_serial_time = now
 
+        # ---- 遥测数据推送 ----
+        telem.push(ball_phys_x, ball_phys_y,
+                   task_info["target_x"], task_info["target_y"], now)
+        telem.update_plot()
+
         # ---- 绘制标定区域 ----
         pts = np.array(corners, dtype=np.int32).reshape((-1, 1, 2))
         cv2.polylines(frame, [pts], isClosed=True, color=(0, 180, 0), thickness=1)
@@ -476,6 +485,12 @@ def main():
             status_text = f"UART: {args.port}" if serial_ok else "UART: DISCONNECTED"
             cv2.putText(frame, status_text, (10, frame.shape[0] - 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, status_color, 1, cv2.LINE_AA)
+
+        # ---- 遥测状态显示 ----
+        telem_color = (0, 255, 0) if telem.is_visible else (128, 128, 128)
+        telem_text = "[W] Waveform: ON" if telem.is_visible else "[W] Waveform: OFF"
+        cv2.putText(frame, telem_text, (frame.shape[1] - 200, frame.shape[0] - 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, telem_color, 1, cv2.LINE_AA)
 
         # ---- 显示 ----
         cv2.imshow("Original", frame)
@@ -510,6 +525,8 @@ def main():
         elif key == ord("0"):
             sm.switch_task(0)
             print("[SM] 已回到空闲模式")
+        elif key == ord("w"):
+            telem.toggle()
 
     # ---- 释放资源 ----
     cap.release()
