@@ -1,0 +1,20 @@
+{
+  "configurations": [
+    {
+      "name": "STM32",
+      "includePath": [
+        "Core/Inc",
+        "Drivers/CMSIS/Device/ST/STM32F1xx/Include",
+        "Drivers/CMSIS/Include",
+        "Drivers/STM32F1xx_HAL_Driver/Inc",
+        "Drivers/STM32F1xx_HAL_Driver/Inc/Legacy"
+      ],
+      "defines": [
+        "STM32F103xB",
+        "USE_HAL_DRIVER"
+      ],
+      "compilerPath": "D:\\EmbedDev\\00_Env_Tool\\gcc-arm\\bin\\arm-none-eabi-gcc.EXE"
+    }
+  ],
+  "version": 4
+}

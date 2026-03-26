@@ -1,0 +1,4 @@
+{
+    "cortex-debug.armToolchainPath": "D:\\EmbedDev\\00_Env_Tool\\gcc-arm\\bin",
+    "cortex-debug.openocdPath": "D:\\EmbedDev\\00_Env_Tool\\OpenOCD\\bin\\openocd.EXE"
+}
