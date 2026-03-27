@@ -38,6 +38,7 @@ MIN_CONTOUR_AREA = 100
 LOST_THRESHOLD = 5
 SERIAL_INTERVAL = 0.020
 SERIAL_BAUDRATE = 115200
+RECONNECT_INTERVAL = 1.0
 CORNER_NAMES = ["左上", "右上", "右下", "左下"]
 
 
@@ -87,7 +88,7 @@ def open_serial(port):
         print("[INFO] 未指定串口，仅本地显示模式")
         return None
     try:
-        ser = serial.Serial(port, SERIAL_BAUDRATE, timeout=0.1)
+        ser = serial.Serial(port, SERIAL_BAUDRATE, timeout=0.1, write_timeout=0.02)
         print(f"[INFO] 串口 {port} 已打开 ({SERIAL_BAUDRATE}bps)")
         return ser
     except serial.SerialException as e:
@@ -366,6 +367,7 @@ def main():
     frame_count: int = 0
     lost_count: int = 0
     last_serial_time: float = 0.0
+    last_reconnect_time: float = 0.0
     serial_ok: bool = ser is not None
 
     port_name = args.port if args.port else "无"
@@ -442,6 +444,12 @@ def main():
         # ---- 状态机更新 ----
         task_info = sm.update(ball_phys_x, ball_phys_y, now)
 
+        # ---- 串口断开后自动重连 ----
+        if args.port and (not serial_ok) and ((now - last_reconnect_time) >= RECONNECT_INTERVAL):
+            last_reconnect_time = now
+            ser = open_serial(args.port)
+            serial_ok = ser is not None
+
         # ---- 串口发送（50Hz 限速） ----
         if serial_ok and (now - last_serial_time) >= SERIAL_INTERVAL:
             # T 帧（目标变化时，优先发送）
@@ -449,6 +457,12 @@ def main():
                 t_msg = f"T:{task_info['target_x']:.1f},Y:{task_info['target_y']:.1f}\n"
                 if not send_serial(ser, t_msg):
                     serial_ok = False
+                    if ser is not None:
+                        try:
+                            ser.close()
+                        except Exception:
+                            pass
+                        ser = None
                     print("[WARN] 串口已断开")
                 last_serial_time = now
             # X 帧 / LOST 帧
@@ -456,10 +470,22 @@ def main():
                 msg = f"X:{real_x:.1f},Y:{real_y:.1f}\n"
                 if not send_serial(ser, msg):
                     serial_ok = False
+                    if ser is not None:
+                        try:
+                            ser.close()
+                        except Exception:
+                            pass
+                        ser = None
                 last_serial_time = now
             elif lost_count >= LOST_THRESHOLD:
                 if not send_serial(ser, "LOST\n"):
                     serial_ok = False
+                    if ser is not None:
+                        try:
+                            ser.close()
+                        except Exception:
+                            pass
+                        ser = None
                 last_serial_time = now
 
         # ---- 遥测数据推送 ----
@@ -481,8 +507,15 @@ def main():
 
         # ---- 串口状态（左下角上方） ----
         if args.port:
-            status_color = (0, 255, 0) if serial_ok else (0, 0, 255)
-            status_text = f"UART: {args.port}" if serial_ok else "UART: DISCONNECTED"
+            if serial_ok:
+                status_color = (0, 255, 0)
+                status_text = f"UART: {args.port} CONNECTED"
+            elif ser is None:
+                status_color = (0, 165, 255)
+                status_text = "UART: RECONNECTING"
+            else:
+                status_color = (0, 0, 255)
+                status_text = "UART: DISCONNECTED"
             cv2.putText(frame, status_text, (10, frame.shape[0] - 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, status_color, 1, cv2.LINE_AA)
 

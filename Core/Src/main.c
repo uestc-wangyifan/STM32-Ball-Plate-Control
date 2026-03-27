@@ -56,6 +56,7 @@
 #define POS_FILTER_ALPHA          0.2f
 
 #define LOST_FRAME_THRESHOLD      5
+#define RX_TIMEOUT_MS             120U
 
 /* USER CODE END PD */
 
@@ -91,7 +92,7 @@ typedef struct {
   float last_derivative;
 } PID_TypeDef;
 
-PID_TypeDef pid_x, pid_y;
+volatile PID_TypeDef pid_x, pid_y;
 
 volatile ControlState control_state = STATE_INIT;
 
@@ -109,6 +110,7 @@ volatile uint16_t rx_len = 0;
 
 volatile uint8_t data_ready_flag = 0;  
 volatile uint8_t servo_center_flag = 0;
+volatile uint32_t last_rx_tick = 0;
 int lost_frame_count = 0;
 int invalid_frame_count = 0;
 /* USER CODE END 0 */
@@ -160,6 +162,11 @@ OLED_Clear();
 
 HAL_UART_Receive_DMA(&huart1, rx_buffer, sizeof(rx_buffer)); 
 __HAL_UART_ENABLE_IT(&huart1, UART_IT_IDLE);                 
+last_rx_tick = HAL_GetTick();
+
+__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1500);
+__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 1500);
+HAL_Delay(500);
 
 HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1); 
 HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4); 
@@ -199,16 +206,25 @@ while (1)
           raw_x = strtof(p + 2, &endptr);
           char *comma = strchr(endptr, ','); 
             if (comma && *(comma + 1) == 'Y' && *(comma + 2) == ':') {
-            raw_y = strtof(comma + 3, NULL);
-            valid_pos_frame = 1;
+              char *y_start = comma + 3;
+              char *y_end;
+              raw_y = strtof(y_start, &y_end);
+              if (y_end != y_start &&
+                  (*y_end == '\0' || *y_end == '\r' || *y_end == '\n' ||
+                   *y_end == ' ' || *y_end == '\t')) {
+                valid_pos_frame = 1;
+              }
             }
         } 
         else {
           char *endptr;
           raw_x = strtof(p, &endptr);
           if (endptr != p && *endptr == ',') {
-            raw_y = strtof(endptr + 1, &endptr);
-            if (endptr != NULL) {
+            char *y_start = endptr + 1;
+            raw_y = strtof(y_start, &endptr);
+            if (endptr != y_start &&
+                (*endptr == '\0' || *endptr == '\r' || *endptr == '\n' ||
+                 *endptr == ' ' || *endptr == '\t')) {
               valid_pos_frame = 1;
             }
           }
@@ -223,6 +239,7 @@ while (1)
 
           current_x = last_pos_x;
           current_y = last_pos_y;
+          last_rx_tick = HAL_GetTick();
 
           data_ready_flag = 1;
           lost_frame_count = 0;
@@ -236,9 +253,16 @@ while (1)
             float temp_x = strtof(p + 2, &endptr);
             char *comma = strchr(endptr, ',');
             if (comma && *(comma + 1) == 'Y' && *(comma + 2) == ':') {
-            target_x = fminf(POS_MAX_MM, fmaxf(POS_MIN_MM, temp_x));
-            target_y = fminf(POS_MAX_MM, fmaxf(POS_MIN_MM, strtof(comma + 3, NULL)));
-          }
+              char *y_start = comma + 3;
+              char *y_end;
+              float temp_y = strtof(y_start, &y_end);
+              if (y_end != y_start &&
+                  (*y_end == '\0' || *y_end == '\r' || *y_end == '\n' ||
+                   *y_end == ' ' || *y_end == '\t')) {
+                target_x = fminf(POS_MAX_MM, fmaxf(POS_MIN_MM, temp_x));
+                target_y = fminf(POS_MAX_MM, fmaxf(POS_MIN_MM, temp_y));
+              }
+            }
         }
         else if (strncmp(p, "PID:", 4) == 0) {
           char *cursor = p + 4;
@@ -267,16 +291,16 @@ while (1)
         }
         else if (strncmp(local_buf, "LOST", 4) == 0) {
             lost_frame_count++;
+          data_ready_flag = 0;
           if (lost_frame_count > LOST_FRAME_THRESHOLD) {
-                data_ready_flag = 0;     
                 servo_center_flag = 1;   
             control_state = STATE_LOST;
             }
         }
             else if (strlen(local_buf) > 0) {
               invalid_frame_count++;
+              data_ready_flag = 0;
               if (invalid_frame_count > LOST_FRAME_THRESHOLD) {
-                data_ready_flag = 0;
                 servo_center_flag = 1;
                 control_state = STATE_LOST;
               }
@@ -351,7 +375,7 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 #define LIMIT(val, min, max) ((val) < (min) ? (min) : ((val) > (max) ? (max) : (val)))
 
-float PID_Calculate(PID_TypeDef *pid, float target, float current, float dt) 
+float PID_Calculate(volatile PID_TypeDef *pid, float target, float current, float dt) 
 {
   if (dt <= 0.0f) {
     dt = CONTROL_DT;
@@ -378,6 +402,13 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM2) 
     {
+    if ((HAL_GetTick() - last_rx_tick) > RX_TIMEOUT_MS) {
+      data_ready_flag = 0;
+      servo_center_flag = 1;
+      control_state = STATE_LOST;
+      return;
+    }
+
         if(servo_center_flag) {
             servo_center_flag = 0;
             __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1500);
