@@ -352,6 +352,14 @@ def main():
                 sm.target_y = phys_y
                 sm.t_frame_pending = True
                 print(f"[Task4] 目标设为: ({phys_x:.0f}, {phys_y:.0f}) mm")
+            elif sm.current_task == 6:
+                result = sm.set_task6_point(phys_x, phys_y)
+                if result == "first":
+                    print(f"[Task6] 已记录起点 A: ({phys_x:.0f}, {phys_y:.0f}) mm，请点击终点 B")
+                elif result == "too_short":
+                    print("[Task6] 轨迹长度必须严格大于 100mm，请重新点击终点 B")
+                elif result == "updated":
+                    print(f"[Task6] 往复轨迹已更新，A=({sm._reciprocate_a[0]:.0f}, {sm._reciprocate_a[1]:.0f}) mm, B=({sm._reciprocate_b[0]:.0f}, {sm._reciprocate_b[1]:.0f}) mm")
 
     # ---- Trackbar + 窗口 ----
     create_trackbars(hsv)
@@ -373,6 +381,7 @@ def main():
     port_name = args.port if args.port else "无"
     print(f"[INFO] 串口: {port_name}")
     print("[INFO] 按 4-7 切换任务 | Space 开始 | R 重置 | S 保存 | Q 退出")
+    print("[INFO] Task 6: 鼠标点击两点设置往复轨迹，长度必须严格大于 100mm")
 
     while True:
         ret, frame = cap.read()

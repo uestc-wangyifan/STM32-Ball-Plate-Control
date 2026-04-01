@@ -17,8 +17,9 @@ STABLE_DIST_THRESHOLD = 10.0   # 球距目标 < 10mm 判定为到达
 STABLE_FRAMES_NEEDED = 25      # 连续 25 帧（约 0.5s）稳定才算真正到达
 
 # ---- Task 6 往复运动参数 ----
-RECIPROCATE_A = (100.0, 150.0)  # 往复点 A (mm)
-RECIPROCATE_B = (200.0, 150.0)  # 往复点 B (mm)
+MIN_RECIPROCATE_LENGTH_MM = 100.0
+RECIPROCATE_A = (90.0, 150.0)   # 默认往复点 A (mm)，默认轨迹长度 120mm
+RECIPROCATE_B = (210.0, 150.0)  # 默认往复点 B (mm)
 
 
 class TaskStateMachine:
@@ -36,6 +37,9 @@ class TaskStateMachine:
 
         # Task 6 专用
         self._reciprocate_index = 0   # 0=去A, 1=去B
+        self._reciprocate_a = RECIPROCATE_A
+        self._reciprocate_b = RECIPROCATE_B
+        self._task6_pending_point = None
 
         # Task 5 专用
         self._referee_target_set = False  # 裁判是否已指定目标
@@ -49,13 +53,17 @@ class TaskStateMachine:
 
         self.current_task = task_id
         self.state = "IDLE" if task_id == 0 else "READY"
-        self.target_x = 150.0
-        self.target_y = 150.0
+        if task_id == 6:
+            self.target_x, self.target_y = self._reciprocate_a
+        else:
+            self.target_x = 150.0
+            self.target_y = 150.0
         self.start_time = 0.0
         self.elapsed = 0.0
         self.stable_count = 0
         self.t_frame_pending = True  # 切换任务时发送一次 T 帧
         self._reciprocate_index = 0
+        self._task6_pending_point = None
         self._referee_target_set = False
 
     def start(self):
@@ -65,6 +73,29 @@ class TaskStateMachine:
             self.start_time = time.time()
             self.stable_count = 0
             self.t_frame_pending = True
+
+    def set_task6_point(self, phys_x, phys_y):
+        """Task 6: 用两次点击设置往复轨迹，且长度必须严格大于 10cm。"""
+        if self.current_task != 6:
+            return "ignored"
+
+        if self._task6_pending_point is None:
+            self._task6_pending_point = (phys_x, phys_y)
+            return "first"
+
+        start_x, start_y = self._task6_pending_point
+        dist = math.hypot(phys_x - start_x, phys_y - start_y)
+        if dist <= MIN_RECIPROCATE_LENGTH_MM:
+            return "too_short"
+
+        self._reciprocate_a = (start_x, start_y)
+        self._reciprocate_b = (phys_x, phys_y)
+        self._task6_pending_point = None
+        self._reciprocate_index = 0
+        self.target_x, self.target_y = self._reciprocate_a
+        self.stable_count = 0
+        self.t_frame_pending = True
+        return "updated"
 
     def reset(self):
         """按 R 重置当前任务"""
@@ -174,9 +205,9 @@ class TaskStateMachine:
             if self.stable_count >= 10:  # 短暂停留即切换
                 self._reciprocate_index = 1 - self._reciprocate_index
                 if self._reciprocate_index == 0:
-                    self.target_x, self.target_y = RECIPROCATE_A
+                    self.target_x, self.target_y = self._reciprocate_a
                 else:
-                    self.target_x, self.target_y = RECIPROCATE_B
+                    self.target_x, self.target_y = self._reciprocate_b
                 self.stable_count = 0
                 self.t_frame_pending = True
         else:
