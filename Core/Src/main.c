@@ -185,10 +185,10 @@ while (1)
     // === 阶段 A: 解析串口数据 ===
     if (rx_flag == 1) 
     {
-        rx_flag = 0; 
         char local_buf[50];
         
         __disable_irq(); 
+        rx_flag = 0;
         memcpy(local_buf, (void*)parse_buffer, sizeof(local_buf));
         __enable_irq();  
         
