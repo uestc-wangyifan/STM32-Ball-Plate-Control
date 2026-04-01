@@ -344,8 +344,11 @@ def main():
             phys_y = max(0.0, min(float(BOARD_SIZE_MM), phys_y))
 
             if sm.current_task == 5:
-                sm.set_referee_target(phys_x, phys_y)
-                print(f"[Task5] 裁判指定目标: ({phys_x:.0f}, {phys_y:.0f}) mm")
+                result = sm.set_referee_target(phys_x, phys_y)
+                if result == "updated":
+                    print(f"[Task5] 裁判指定目标: ({phys_x:.0f}, {phys_y:.0f}) mm")
+                elif result == "not_ready":
+                    print("[Task5] 需先在中心稳定，再接受裁判指定目标")
             elif sm.current_task == 4:
                 # Task4 也允许点击设目标
                 sm.target_x = phys_x

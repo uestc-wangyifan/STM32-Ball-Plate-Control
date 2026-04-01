@@ -43,6 +43,7 @@ class TaskStateMachine:
 
         # Task 5 专用
         self._referee_target_set = False  # 裁判是否已指定目标
+        self._task5_center_ready = False
 
     # ---- 公开接口 ----
 
@@ -65,6 +66,7 @@ class TaskStateMachine:
         self._reciprocate_index = 0
         self._task6_pending_point = None
         self._referee_target_set = False
+        self._task5_center_ready = False
 
     def start(self):
         """按 Space 开始当前任务"""
@@ -107,13 +109,18 @@ class TaskStateMachine:
         Task 5: 鼠标点击设置裁判指定目标点。
         phys_x, phys_y 是透视变换后的物理坐标 (mm)。
         """
-        if self.current_task == 5 and self.state == "RUNNING":
-            self.target_x = phys_x
-            self.target_y = phys_y
-            self._referee_target_set = True
-            self.start_time = time.time()  # 重新计时
-            self.stable_count = 0
-            self.t_frame_pending = True
+        if self.current_task != 5 or self.state != "RUNNING":
+            return "ignored"
+        if not self._task5_center_ready:
+            return "not_ready"
+
+        self.target_x = phys_x
+        self.target_y = phys_y
+        self._referee_target_set = True
+        self.start_time = time.time()  # 重新计时
+        self.stable_count = 0
+        self.t_frame_pending = True
+        return "updated"
 
     def update(self, ball_x, ball_y, now):
         """
@@ -181,9 +188,16 @@ class TaskStateMachine:
             self.state = "DONE"
 
     def _update_task5(self, ball_x, ball_y, dist):
-        """Task 5: 裁判指定目标"""
+        """Task 5: 先中心稳定，再接受裁判指定目标"""
         if not self._referee_target_set:
-            # 等待鼠标点击设置目标, 先保持在中心
+            if ball_x is not None and dist < STABLE_DIST_THRESHOLD:
+                self.stable_count += 1
+            else:
+                self.stable_count = 0
+
+            if self.stable_count >= STABLE_FRAMES_NEEDED:
+                self._task5_center_ready = True
+                self.stable_count = 0
             return
 
         if ball_x is not None and dist < STABLE_DIST_THRESHOLD:
