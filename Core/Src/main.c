@@ -292,7 +292,7 @@ while (1)
         else if (strncmp(local_buf, "LOST", 4) == 0) {
             lost_frame_count++;
           data_ready_flag = 0;
-          if (lost_frame_count > LOST_FRAME_THRESHOLD) {
+          if (lost_frame_count >= LOST_FRAME_THRESHOLD) {
                 servo_center_flag = 1;   
             control_state = STATE_LOST;
             }
@@ -300,7 +300,7 @@ while (1)
             else if (strlen(local_buf) > 0) {
               invalid_frame_count++;
               data_ready_flag = 0;
-              if (invalid_frame_count > LOST_FRAME_THRESHOLD) {
+              if (invalid_frame_count >= LOST_FRAME_THRESHOLD) {
                 servo_center_flag = 1;
                 control_state = STATE_LOST;
               }
@@ -406,13 +406,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
       data_ready_flag = 0;
       servo_center_flag = 1;
       control_state = STATE_LOST;
-      return;
     }
 
         if(servo_center_flag) {
             servo_center_flag = 0;
-            __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1500);
-            __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 1500);
+            __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (uint32_t)SERVO_CENTER_US);
+            __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, (uint32_t)SERVO_CENTER_US);
             return; 
         }
 
