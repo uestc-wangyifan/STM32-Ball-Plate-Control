@@ -37,6 +37,7 @@ MORPH_KERNEL_SIZE = 5
 MIN_CONTOUR_AREA = 100
 LOST_THRESHOLD = 5
 SERIAL_INTERVAL = 0.020
+T_FRAME_KEEPALIVE = 0.2
 SERIAL_BAUDRATE = 115200
 RECONNECT_INTERVAL = 1.0
 CORNER_NAMES = ["左上", "右上", "右下", "左下"]
@@ -159,7 +160,9 @@ def compute_inverse_perspective(corners_px):
 def pixel_to_physical(px, py, M):
     point = np.float32([[[px, py]]])
     result = cv2.perspectiveTransform(point, M)
-    return float(result[0][0][0]), float(result[0][0][1])
+    phys_x = max(0.0, min(float(BOARD_SIZE_MM), float(result[0][0][0])))
+    phys_y = max(0.0, min(float(BOARD_SIZE_MM), float(result[0][0][1])))
+    return phys_x, phys_y
 
 
 def physical_to_pixel(phys_x, phys_y, M_inv):
@@ -379,6 +382,7 @@ def main():
     lost_count: int = 0
     camera_fail_count: int = 0
     last_serial_time: float = 0.0
+    last_t_frame_time: float = 0.0
     last_reconnect_time: float = 0.0
     serial_ok: bool = ser is not None
 
@@ -449,14 +453,31 @@ def main():
         ball_phys_y: float | None = None
 
         if contours:
-            max_contour = max(contours, key=cv2.contourArea)
-            area = cv2.contourArea(max_contour)
+            best_contour = None
+            best_area = 0.0
 
-            if area >= MIN_CONTOUR_AREA:
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area < MIN_CONTOUR_AREA:
+                    continue
+
+                perimeter = cv2.arcLength(contour, True)
+                if perimeter <= 0:
+                    continue
+
+                circularity = 4.0 * np.pi * area / (perimeter * perimeter)
+                if circularity < 0.6:
+                    continue
+
+                if area > best_area:
+                    best_area = area
+                    best_contour = contour
+
+            if best_contour is not None:
                 ball_found = True
                 lost_count = 0
 
-                (cx, cy), radius = cv2.minEnclosingCircle(max_contour)
+                (cx, cy), radius = cv2.minEnclosingCircle(best_contour)
                 cx, cy, radius = int(cx), int(cy), int(radius)
 
                 cv2.circle(frame, (cx, cy), radius, (0, 255, 0), 2)
@@ -493,8 +514,11 @@ def main():
 
         # ---- 串口发送（50Hz 限速） ----
         if serial_ok and (now - last_serial_time) >= SERIAL_INTERVAL:
+            need_t_frame = task_info["send_t_frame"] or (
+                sm.current_task != 0 and (now - last_t_frame_time) >= T_FRAME_KEEPALIVE
+            )
             # T 帧（目标变化时，优先发送）
-            if task_info["send_t_frame"]:
+            if need_t_frame:
                 t_msg = f"T:{task_info['target_x']:.1f},Y:{task_info['target_y']:.1f}\n"
                 if not send_serial(ser, t_msg):
                     serial_ok = False
@@ -505,6 +529,8 @@ def main():
                             pass
                         ser = None
                     print("[WARN] 串口已断开")
+                else:
+                    last_t_frame_time = now
                 last_serial_time = now
             # X 帧 / LOST 帧
             elif ball_found:
