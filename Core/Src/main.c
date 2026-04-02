@@ -289,13 +289,11 @@ while (1)
             }
             }
         }
-        else if (strncmp(local_buf, "LOST", 4) == 0) {
-            lost_frame_count++;
+        else if (strncmp(p, "LOST", 4) == 0) {
+            lost_frame_count = LOST_FRAME_THRESHOLD;
           data_ready_flag = 0;
-          if (lost_frame_count >= LOST_FRAME_THRESHOLD) {
-                servo_center_flag = 1;   
-            control_state = STATE_LOST;
-            }
+          servo_center_flag = 1;
+          control_state = STATE_LOST;
         }
             else if (strlen(local_buf) > 0) {
               invalid_frame_count++;

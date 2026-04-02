@@ -377,6 +377,7 @@ def main():
     prev_time: float = time.time()
     frame_count: int = 0
     lost_count: int = 0
+    camera_fail_count: int = 0
     last_serial_time: float = 0.0
     last_reconnect_time: float = 0.0
     serial_ok: bool = ser is not None
@@ -389,8 +390,36 @@ def main():
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("[ERROR] 读取帧失败")
-            break
+            camera_fail_count += 1
+            lost_count += 1
+            now = time.time()
+
+            if camera_fail_count == 1:
+                print("[WARN] 读取帧失败，按丢球处理")
+
+            if args.port and (not serial_ok) and ((now - last_reconnect_time) >= RECONNECT_INTERVAL):
+                last_reconnect_time = now
+                ser = open_serial(args.port)
+                serial_ok = ser is not None
+
+            if serial_ok and lost_count >= LOST_THRESHOLD and (now - last_serial_time) >= SERIAL_INTERVAL:
+                if not send_serial(ser, "LOST\n"):
+                    serial_ok = False
+                    if ser is not None:
+                        try:
+                            ser.close()
+                        except Exception:
+                            pass
+                        ser = None
+                last_serial_time = now
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                break
+            time.sleep(0.01)
+            continue
+
+        camera_fail_count = 0
 
         frame_count += 1
         now = time.time()
