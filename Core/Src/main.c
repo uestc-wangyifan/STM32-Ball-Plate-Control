@@ -41,8 +41,9 @@
 /* USER CODE BEGIN PD */
 #define CONTROL_DT                0.02f
 #define DERIV_TAU                 0.03f
-#define INTEGRAL_MAX              200.0f
 #define CONTROL_OUTPUT_LIMIT      300.0f
+#define INTEGRAL_OUTPUT_LIMIT      80.0f   /* [C2] I项输出限幅 */
+#define ERROR_DEADBAND_MM           2.0f   /* [C2] 死区 */
 
 #define SERVO_CENTER_US           1500.0f
 #define SERVO_MIN_US              1200.0f
@@ -53,7 +54,7 @@
 
 #define POS_MIN_MM                0.0f
 #define POS_MAX_MM                300.0f
-#define POS_FILTER_ALPHA          0.2f
+#define POS_FILTER_ALPHA          0.5f   /* [C1] 加快低通响应 */
 
 #define LOST_FRAME_THRESHOLD      5
 #define RX_TIMEOUT_MS             120U
@@ -102,6 +103,7 @@ volatile float current_x = 0.0f;
 volatile float current_y = 0.0f;
 float last_pos_x = 0.0f;
 float last_pos_y = 0.0f;
+volatile uint8_t pos_filter_seeded = 0;  /* [C1] 首帧seed标志 */
 
 uint8_t rx_buffer[50];                 
 volatile uint8_t parse_buffer[50];     
@@ -113,6 +115,34 @@ volatile uint8_t servo_center_flag = 0;
 volatile uint32_t last_rx_tick = 0;
 int lost_frame_count = 0;
 int invalid_frame_count = 0;
+
+/* [C1] 重置PID内部状态 */
+static void PID_Reset(volatile PID_TypeDef *pid, float measurement)
+{
+  pid->integral = 0.0f;
+  pid->last_measurement = measurement;
+  pid->last_derivative = 0.0f;
+}
+
+/* [C1] 进入LOST状态，同时清滤波器和PID历史 */
+static void Control_EnterLostState(void)
+{
+  data_ready_flag = 0;
+  servo_center_flag = 1;
+  lost_frame_count = LOST_FRAME_THRESHOLD;
+  control_state = STATE_LOST;
+  pos_filter_seeded = 0;
+  PID_Reset(&pid_x, current_x);
+  PID_Reset(&pid_y, current_y);
+}
+/* [T1] 判断字符串是否是纯空白（不计入 invalid_frame_count） */
+static uint8_t IsBlankLine(const char *p)
+{
+  while (*p == ' ' || *p == '\r' || *p == '\n' || *p == '\t') {
+    p++;
+  }
+  return (*p == '\0');
+}
 /* USER CODE END 0 */
 
 /**
@@ -160,20 +190,29 @@ OLED_ShowStr(0, 2, (unsigned char*)"System Booting...", 1);
 HAL_Delay(500); 
 OLED_Clear();
 
-HAL_UART_Receive_DMA(&huart1, rx_buffer, sizeof(rx_buffer)); 
-__HAL_UART_ENABLE_IT(&huart1, UART_IT_IDLE);                 
+/* [S1] UART DMA 加返回值检查 */
+if (HAL_UART_Receive_DMA(&huart1, rx_buffer, sizeof(rx_buffer)) != HAL_OK) {
+    Error_Handler();
+}
+__HAL_UART_ENABLE_IT(&huart1, UART_IT_IDLE);
 last_rx_tick = HAL_GetTick();
 
-__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1500);
-__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 1500);
-HAL_Delay(500);
+/* [S1] 先写中位再开PWM，用 SERVO_CENTER_US 替代硬编码 */
+__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (uint32_t)SERVO_CENTER_US);
+__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, (uint32_t)SERVO_CENTER_US);
 
-HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1); 
-HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4); 
-__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1500);
-__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 1500);
-HAL_Delay(200);
-HAL_TIM_Base_Start_IT(&htim2);
+if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK) {
+    Error_Handler();
+}
+if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4) != HAL_OK) {
+    Error_Handler();
+}
+
+HAL_Delay(500);  /* [S1] PWM启动后等待舵机机械归中 */
+
+if (HAL_TIM_Base_Start_IT(&htim2) != HAL_OK) {
+    Error_Handler();
+}
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -215,38 +254,36 @@ while (1)
                 valid_pos_frame = 1;
               }
             }
-        } 
-        else {
-          char *endptr;
-          raw_x = strtof(p, &endptr);
-          if (endptr != p && *endptr == ',') {
-            char *y_start = endptr + 1;
-            raw_y = strtof(y_start, &endptr);
-            if (endptr != y_start &&
-                (*endptr == '\0' || *endptr == '\r' || *endptr == '\n' ||
-                 *endptr == ' ' || *endptr == '\t')) {
-              valid_pos_frame = 1;
-            }
-          }
         }
 
         if (valid_pos_frame) {
           raw_x = fminf(POS_MAX_MM, fmaxf(POS_MIN_MM, raw_x));
           raw_y = fminf(POS_MAX_MM, fmaxf(POS_MIN_MM, raw_y));
 
-          last_pos_x = POS_FILTER_ALPHA * raw_x + (1.0f - POS_FILTER_ALPHA) * last_pos_x;
-          last_pos_y = POS_FILTER_ALPHA * raw_y + (1.0f - POS_FILTER_ALPHA) * last_pos_y;
+          /* [C1] 首帧/恢复用原始值seed，避免从0低通 */
+          if (!pos_filter_seeded || control_state != STATE_RUN) {
+            last_pos_x = raw_x;
+            last_pos_y = raw_y;
+            pos_filter_seeded = 1U;
+          } else {
+            last_pos_x = POS_FILTER_ALPHA * raw_x + (1.0f - POS_FILTER_ALPHA) * last_pos_x;
+            last_pos_y = POS_FILTER_ALPHA * raw_y + (1.0f - POS_FILTER_ALPHA) * last_pos_y;
+          }
 
           current_x = last_pos_x;
           current_y = last_pos_y;
-          last_rx_tick = HAL_GetTick();
 
-          data_ready_flag = 1;
+          /* [C1] 状态恢复时重置PID历史 */
+          if (control_state != STATE_RUN) {
+            PID_Reset(&pid_x, current_x);
+            PID_Reset(&pid_y, current_y);
+          }
+
+          last_rx_tick = HAL_GetTick();
+          data_ready_flag = 1U;
           lost_frame_count = 0;
           invalid_frame_count = 0;
-          if (control_state != STATE_RUN) {
-            control_state = STATE_RUN;
-          }
+          control_state = STATE_RUN;
         }
         else if (p[0] == 'T' && p[1] == ':') {
             char *endptr;
@@ -274,28 +311,41 @@ while (1)
             if (endptr != cursor && *endptr == ',') {
               cursor = endptr + 1;
               float d_val = strtof(cursor, &endptr);
-              if (endptr != cursor) {
+
+              /* [C3] 跳过尾部空白 */
+              while (*endptr == ' ' || *endptr == '\r' || *endptr == '\n' || *endptr == '\t') {
+                endptr++;
+              }
+
+              /* [C3] 帧尾干净 + 数值有效 + 范围检查，全满足才写入 */
+              if (endptr != cursor &&
+                  *endptr == '\0' &&
+                  isfinite(p_val) && isfinite(i_val) && isfinite(d_val) &&
+                  p_val > 0.0f && p_val < 10.0f &&
+                  i_val >= 0.0f && i_val < 5.0f &&
+                  d_val >= 0.0f && d_val < 5.0f) {
+
                 __disable_irq();
-                if (p_val > 0.0f && p_val < 10.0f) pid_x.Kp = p_val;
-                if (i_val >= 0.0f && i_val < 5.0f) pid_x.Ki = i_val;
-                if (d_val >= 0.0f && d_val < 5.0f) pid_x.Kd = d_val;
-                pid_y = pid_x;
-                pid_x.integral = 0.0f;
-                pid_y.integral = 0.0f;
-                pid_x.last_derivative = 0.0f;
-                pid_y.last_derivative = 0.0f;
+                /* [C3] 逐字段赋值，避免 pid_y=pid_x 污染 last_measurement */
+                pid_x.Kp = p_val;
+                pid_x.Ki = i_val;
+                pid_x.Kd = d_val;
+                pid_y.Kp = p_val;
+                pid_y.Ki = i_val;
+                pid_y.Kd = d_val;
+                PID_Reset(&pid_x, current_x);
+                PID_Reset(&pid_y, current_y);
                 __enable_irq();
               }
             }
-            }
+          }
         }
-        else if (strncmp(p, "LOST", 4) == 0) {
-            lost_frame_count = LOST_FRAME_THRESHOLD;
-          data_ready_flag = 0;
-          servo_center_flag = 1;
-          control_state = STATE_LOST;
+        else if (strncmp(p, "LOST", 4) == 0 &&
+                 (p[4] == '\0' || p[4] == '\r' || p[4] == '\n' ||
+                  p[4] == ' ' || p[4] == '\t')) {
+          Control_EnterLostState();  /* [C1] 清PID/滤波状态 */
         }
-            else if (strlen(local_buf) > 0) {
+            else if (!IsBlankLine(p)) {  /* [T1] 空白帧不计入 invalid */
               invalid_frame_count++;
               data_ready_flag = 0;
               if (invalid_frame_count >= LOST_FRAME_THRESHOLD) {
@@ -380,10 +430,20 @@ float PID_Calculate(volatile PID_TypeDef *pid, float target, float current, floa
   }
 
     float error = target - current;
+    /* [C2] 死区：目标附近不产生控制量 */
+    if (fabsf(error) < ERROR_DEADBAND_MM) {
+      error = 0.0f;
+    }
+
     pid->integral += (error * dt);
-    
-    if(pid->integral > INTEGRAL_MAX) pid->integral = INTEGRAL_MAX;
-    else if(pid->integral < -INTEGRAL_MAX) pid->integral = -INTEGRAL_MAX;
+
+    /* [C2] 积分限幅按I项输出量级 */
+    if (pid->Ki > 0.0f) {
+      float integral_limit = INTEGRAL_OUTPUT_LIMIT / pid->Ki;
+      pid->integral = LIMIT(pid->integral, -integral_limit, integral_limit);
+    } else {
+      pid->integral = 0.0f;
+    }
     
   float raw_derivative = -(current - pid->last_measurement) / dt;
   float alpha = dt / (DERIV_TAU + dt);
@@ -401,9 +461,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     if (htim->Instance == TIM2) 
     {
     if ((HAL_GetTick() - last_rx_tick) > RX_TIMEOUT_MS) {
-      data_ready_flag = 0;
-      servo_center_flag = 1;
-      control_state = STATE_LOST;
+      Control_EnterLostState();  /* [C1] 超时清PID/滤波状态 */
     }
 
         if(servo_center_flag) {

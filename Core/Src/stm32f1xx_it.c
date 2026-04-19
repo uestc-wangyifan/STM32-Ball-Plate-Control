@@ -241,20 +241,38 @@ void USART1_IRQHandler(void)
   /* USER CODE END USART1_IRQn 0 */
   HAL_UART_IRQHandler(&huart1);
   /* USER CODE BEGIN USART1_IRQn 1 */
-if(__HAL_UART_GET_FLAG(&huart1, UART_FLAG_IDLE) != RESET) 
+if(__HAL_UART_GET_FLAG(&huart1, UART_FLAG_IDLE) != RESET)
 {
     __HAL_UART_CLEAR_IDLEFLAG(&huart1);
-    HAL_UART_DMAStop(&huart1);
-    
+
+    /* [T1] DMAStop 失败则丢弃本帧，不写 parse_buffer */
+    if (HAL_UART_DMAStop(&huart1) != HAL_OK) {
+        parse_buffer[0] = '\0';
+        memset((void*)rx_buffer, 0, sizeof(rx_buffer));
+        HAL_UART_Receive_DMA(&huart1, rx_buffer, sizeof(rx_buffer));
+        return;
+    }
+
     rx_len = sizeof(rx_buffer) - __HAL_DMA_GET_COUNTER(&hdma_usart1_rx);
-    
-    // 三元运算符安全限幅
-    rx_len = rx_len < sizeof(parse_buffer) ? rx_len : sizeof(parse_buffer) - 1;
-    memcpy((void*)parse_buffer, (void*)rx_buffer, rx_len);
-    parse_buffer[rx_len] = '\0'; 
-    
-    rx_flag = 1; 
-    
+
+    /* [T1] 超长帧直接丢弃，不截断送解析 */
+    if (rx_len == 0 || rx_len >= sizeof(parse_buffer)) {
+        parse_buffer[0] = '\0';
+        memset((void*)rx_buffer, 0, sizeof(rx_buffer));
+        HAL_UART_Receive_DMA(&huart1, rx_buffer, sizeof(rx_buffer));
+        return;
+    }
+
+    /* [T1] 只有末尾是 \n 或 \r 的完整帧才写 rx_flag */
+    if (rx_buffer[rx_len - 1U] == '\n' || rx_buffer[rx_len - 1U] == '\r') {
+        memcpy((void*)parse_buffer, (void*)rx_buffer, rx_len);
+        parse_buffer[rx_len] = '\0';
+        rx_flag = 1U;
+    } else {
+        /* 不完整帧：清空缓冲，不触发解析 */
+        parse_buffer[0] = '\0';
+    }
+
     memset((void*)rx_buffer, 0, sizeof(rx_buffer));
     HAL_UART_Receive_DMA(&huart1, rx_buffer, sizeof(rx_buffer));
 }

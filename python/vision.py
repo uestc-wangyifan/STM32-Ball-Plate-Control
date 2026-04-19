@@ -46,8 +46,10 @@ CORNER_NAMES = ["左上", "右上", "右下", "左下"]
 # ==================== 配置读写 ====================
 
 def load_config():
+    """[B1] 返回 (hsv, corners, calib_resolution)"""
     hsv = DEFAULT_HSV.copy()
     corners = None
+    calib_resolution = None
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -65,13 +67,23 @@ def load_config():
             if "corners" in data and len(data["corners"]) == 4:
                 corners = data["corners"]
                 print("[INFO] 已加载标定点")
-        except (json.JSONDecodeError, IOError) as e:
+            # [B1] 读取标定分辨率
+            if "calibration_resolution" in data and len(data["calibration_resolution"]) == 2:
+                calib_resolution = (
+                    int(data["calibration_resolution"][0]),
+                    int(data["calibration_resolution"][1]),
+                )
+        except (json.JSONDecodeError, IOError, ValueError, TypeError) as e:
             print(f"[WARN] 读取 config.json 失败: {e}，使用默认值")
-    return hsv, corners
+    return hsv, corners, calib_resolution
 
 
-def save_config(hsv, corners):
-    data: dict = {"hsv": hsv}
+def save_config(hsv, corners, calibration_resolution):
+    """[B1] 保存时含标定分辨率"""
+    data: dict = {
+        "hsv": hsv,
+        "calibration_resolution": [int(calibration_resolution[0]), int(calibration_resolution[1])],
+    }
     if corners is not None:
         data["corners"] = corners
     try:
@@ -298,7 +310,7 @@ def main():
     args = parser.parse_args()
 
     # ---- 加载配置 ----
-    hsv, saved_corners = load_config()
+    hsv, saved_corners, saved_resolution = load_config()  # [B1]
 
     # ---- 打开串口 ----
     ser = open_serial(args.port)
@@ -311,15 +323,20 @@ def main():
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # [P1] 减少帧缓冲
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    actual_resolution = (actual_w, actual_h)  # [B1]
     print(f"[INFO] 摄像头分辨率: {actual_w}x{actual_h}")
 
     # ---- 标定 ----
-    if saved_corners is not None:
+    # [B1] 标定点加载：绑定分辨率校验
+    if saved_corners is not None and saved_resolution == actual_resolution:
         print("[INFO] 已加载标定点（按 'r' 重新标定）")
         corners = saved_corners
     else:
+        if saved_corners is not None and saved_resolution != actual_resolution:
+            print(f"[WARN] 标定分辨率 {saved_resolution} 与当前 {actual_resolution} 不一致，已强制重新标定")
         corners = calibration_phase(cap)
         if corners is None:
             cap.release()
@@ -381,7 +398,7 @@ def main():
     frame_count: int = 0
     lost_count: int = 0
     camera_fail_count: int = 0
-    last_serial_time: float = 0.0
+    next_serial_time: float = time.perf_counter()  # [P1] 单调时钟+追赶式调度
     last_t_frame_time: float = 0.0
     last_reconnect_time: float = 0.0
     serial_ok: bool = ser is not None
@@ -397,16 +414,21 @@ def main():
             camera_fail_count += 1
             lost_count += 1
             now = time.time()
+            mono_now = time.perf_counter()  # [P1]
 
             if camera_fail_count == 1:
                 print("[WARN] 读取帧失败，按丢球处理")
 
-            if args.port and (not serial_ok) and ((now - last_reconnect_time) >= RECONNECT_INTERVAL):
-                last_reconnect_time = now
+            if args.port and (not serial_ok) and ((mono_now - last_reconnect_time) >= RECONNECT_INTERVAL):
+                last_reconnect_time = mono_now
                 ser = open_serial(args.port)
                 serial_ok = ser is not None
 
-            if serial_ok and lost_count >= LOST_THRESHOLD and (now - last_serial_time) >= SERIAL_INTERVAL:
+            # [P1] 追赶式限速发送 LOST
+            if serial_ok and lost_count >= LOST_THRESHOLD and mono_now >= next_serial_time:
+                while next_serial_time <= mono_now:
+                    next_serial_time += SERIAL_INTERVAL
+
                 if not send_serial(ser, "LOST\n"):
                     serial_ok = False
                     if ser is not None:
@@ -415,18 +437,18 @@ def main():
                         except Exception:
                             pass
                         ser = None
-                last_serial_time = now
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
-            time.sleep(0.01)
+            time.sleep(0.005)
             continue
 
         camera_fail_count = 0
 
         frame_count += 1
         now = time.time()
+        mono_now = time.perf_counter()  # [P1]
 
         # ---- FPS ----
         fps = 1.0 / (now - prev_time) if (now - prev_time) > 0 else 0
@@ -507,15 +529,18 @@ def main():
         task_info = sm.update(ball_phys_x, ball_phys_y, now)
 
         # ---- 串口断开后自动重连 ----
-        if args.port and (not serial_ok) and ((now - last_reconnect_time) >= RECONNECT_INTERVAL):
-            last_reconnect_time = now
+        if args.port and (not serial_ok) and ((mono_now - last_reconnect_time) >= RECONNECT_INTERVAL):
+            last_reconnect_time = mono_now
             ser = open_serial(args.port)
             serial_ok = ser is not None
 
-        # ---- 串口发送（50Hz 限速） ----
-        if serial_ok and (now - last_serial_time) >= SERIAL_INTERVAL:
+        # [P1] 追赶式50Hz串口发送
+        if serial_ok and mono_now >= next_serial_time:
+            while next_serial_time <= mono_now:
+                next_serial_time += SERIAL_INTERVAL
+
             need_t_frame = task_info["send_t_frame"] or (
-                sm.current_task != 0 and (now - last_t_frame_time) >= T_FRAME_KEEPALIVE
+                sm.current_task != 0 and (mono_now - last_t_frame_time) >= T_FRAME_KEEPALIVE
             )
             # T 帧（目标变化时，优先发送）
             if need_t_frame:
@@ -530,8 +555,7 @@ def main():
                         ser = None
                     print("[WARN] 串口已断开")
                 else:
-                    last_t_frame_time = now
-                last_serial_time = now
+                    last_t_frame_time = mono_now
             # X 帧 / LOST 帧
             elif ball_found:
                 msg = f"X:{real_x:.1f},Y:{real_y:.1f}\n"
@@ -543,7 +567,6 @@ def main():
                         except Exception:
                             pass
                         ser = None
-                last_serial_time = now
             elif lost_count >= LOST_THRESHOLD:
                 if not send_serial(ser, "LOST\n"):
                     serial_ok = False
@@ -553,7 +576,6 @@ def main():
                         except Exception:
                             pass
                         ser = None
-                last_serial_time = now
 
         # ---- 遥测数据推送 ----
         telem.push(ball_phys_x, ball_phys_y,
@@ -601,7 +623,7 @@ def main():
         if key == ord("q"):
             break
         elif key == ord("s"):
-            save_config(hsv, corners)
+            save_config(hsv, corners, actual_resolution)  # [B1]
         elif key == ord("r"):
             cv2.destroyWindow("Original")
             cv2.destroyWindow("Mask")
