@@ -349,8 +349,7 @@ while (1)
               invalid_frame_count++;
               data_ready_flag = 0;
               if (invalid_frame_count >= LOST_FRAME_THRESHOLD) {
-                servo_center_flag = 1;
-                control_state = STATE_LOST;
+                Control_EnterLostState();
               }
             }
     }
